@@ -17,7 +17,7 @@ import requests
 
 # Connect to Database and create database session
 app = Flask(__name__)
-engine = create_engine('sqlite:///restaurantmenu.db')
+engine = create_engine('sqlite:///restaurantmenuwithusers.db')
 Base.metadata.bind = engine
 
 DBSession = sessionmaker(bind=engine)
@@ -228,7 +228,6 @@ def gconnect():
     if result['issued_to'] != CLIENT_ID:
         response = make_response(
             json.dumps("Token's client ID does not match app's."), 401)
-        print "Token's client ID does not match app's."
         response.headers['Content-Type'] = 'application/json'
         return response
 
@@ -241,6 +240,7 @@ def gconnect():
         return response
 
     # Store the access token in the session for later use.
+    login_session['provider'] = 'google'
     login_session['access_token'] = credentials.access_token
     login_session['gplus_id'] = gplus_id
 
@@ -269,12 +269,11 @@ def gconnect():
     output += login_session['picture']
     output += ' " style = "width: 300px; height: 300px;border-radius: 150px;-webkit-border-radius: 150px;-moz-border-radius: 150px;"> '
     flash("you are now logged in as %s" % login_session['username'])
-    print "done!"
     return output
 
 
 @app.route('/gdisconnect')
-def disconnect():
+def gdisconnect():
     credentials = login_session.get('credentials')
 
     if credentials is None:
@@ -303,6 +302,89 @@ def disconnect():
         return response
 
 
+@app.route('/fbconnect', methods=['POST'])
+def fbconnect():
+    if request.args.get('state') != login_session['state']:
+        response = make_response(json.dumps('Invalid state parameter'), 401)
+        response.headers['Content-Type'] = 'application/json'
+        return response
+
+    access_token = request.data
+    secret_file = open('fb_client_secrets.json', 'r').read()
+    app_id = json.loads(secret_file)['web']['app_id']
+    app_secret = json.loads(secret_file)['web']['app_secret']
+    url = 'https://graph.facebook.com/oauth/access_token?grant_type=fb_exchange_token&client_id=%s&client_secret=%s&fb_exchange_token=%s' % (
+        app_id, app_secret, access_token)
+    h = httplib2.Http()
+    result = h.request(url, 'GET')[1]
+    userinfo_url = 'https://graph.facebook.com/v2.8/me'
+    token = result.split(',')[0].split(':')[1].replace('"', '')
+    url = 'https://graph.facebook.com/v2.8/me?access_token=%s&fields=name,id,email' % token
+    h = httplib2.Http()
+    result = h.request(url, 'GET')[1]
+    data = json.loads(result)
+    login_session['provider'] = 'facebook'
+    login_session['username'] = data['name']
+    login_session['email'] = data['email']
+    login_session['facebook_id'] = data['id']
+    login_session['access_token'] = token
+
+    url = 'https://graph.facebook.com/v2.8/me/picture?access_token=%s&redirect=0&height=200&width=200' % token
+    h = httplib2.Http()
+    result = h.request(url, 'GET')[1]
+    data = json.loads(result)
+    login_session['picture'] = data['data']['url']
+    user_id = get_user_id(login_session['email'])
+
+    if not user_id:
+        user_id = create_user(login_session)
+    
+    login_session['user_id'] = user_id
+
+    output = ''
+    output += '<h1>Welcome, '
+    output += login_session['username']
+
+    output += '!</h1>'
+    output += '<img src="'
+    output += login_session['picture']
+    output += ' " style = "width: 300px; height: 300px;border-radius: 150px;-webkit-border-radius: 150px;-moz-border-radius: 150px;"> '
+
+    flash("Now logged in as %s" % login_session['username'])
+    return output
+
+
+@app.route('/fbdisconnect', methods=['POST'])
+def fbdisconnect():
+    facebook_id = login_session['facebook_id']
+    access_token = login_session['access_token']
+    url = 'https://graph.facebook.com/%s/permissions?access_token=%s' % (facebook_id,access_token)
+    h = httplib2.Http()
+    result = h.request(url, 'DELETE')[1]
+    return 'you have logged out.'
+
+
+@app.route('/disconnect')
+def disconnect():
+    if 'provider' in login_session:
+        if login_session['provider'] == 'google':
+            gdisconnect()
+            del login_session['gplus_id']
+            del login_session['credentials']
+        if login_session['provider'] == 'facebook':
+            fbdisconnect()
+            del login_session['facebook_id']
+        del login_session['username']
+        del login_session['email']
+        del login_session['picture']
+        del login_session['user_id']
+        del login_session['provider']
+        flash("You have successfully been logged out.")
+        return redirect(url_for('showRestaurants'))
+    else:
+        flash("You were not logged in")
+        return redirect(url_for('showRestaurants'))
+
 def get_user_info(user_id):
     user = session.query(User).filter_by(id = user_id).one()
     return user
@@ -317,6 +399,11 @@ def get_user_id(email):
 
 
 def create_user(login_session):
+    user = session.query(User).filter_by(email = login_session['email']).one_or_none()
+
+    if user:
+        return user.id
+    
     new_user = User(
         name = login_session['username'],
         email = login_session['email'],
@@ -324,8 +411,9 @@ def create_user(login_session):
     )
     session.add(new_user)
     session.commit()
-    user = session.query(User).filter_by(emial = login_session['email']).one()
-    return user.id
+    new_user_record = session.query(User).filter_by(email = login_session['email']).one()
+
+    return new_user_record.id
 
 
 if __name__ == '__main__':
